@@ -4,6 +4,8 @@
   python -m photo_editor preview  PHOTO.ARW            (RAW -> JPEG you can look at)
   python -m photo_editor info     PHOTO.ARW
   python -m photo_editor analyze  PHOTO.ARW [--preview-dir out/]
+  python -m photo_editor adjust   PHOTO.ARW --contrast 20 --temperature 5200 --sharpness 60 ...
+  python -m photo_editor sliders  (list the regular-editing sliders)
   python -m photo_editor edit     PHOTO.ARW --preset beauty_only     (as shot, faces retouched only)
   python -m photo_editor edit     PHOTO.ARW --preset natural [--set warmth=10 ...] [-o out.jpg]
                                   [--compare] [--masks] [--tiff] [--fast]
@@ -86,10 +88,15 @@ def cmd_edit(a):
     from .raw_io import load_image, save_image, to_preview
     from .segmentation import mask_overlay
 
-    overrides = _parse_sets(a.set)
+    from .sliders import SLIDERS, parse_hsl, sliders_to_params
+    overrides = {}
     if a.params:
         with open(a.params) as fh:
-            overrides = {**json.load(fh), **overrides}
+            overrides.update(json.load(fh))
+    overrides.update(_parse_sets(a.set))
+    # Lightroom-style sliders win over the preset and --set
+    overrides.update(sliders_to_params({k: getattr(a, k, None) for k in SLIDERS}))
+    overrides.update(parse_hsl(a.hsl))
     params = resolve(a.preset, overrides)
     reports = []
     for f in a.files:
@@ -190,21 +197,17 @@ def cmd_preview(a):
     _print(out if len(out) > 1 else out[0])
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(prog="photo_editor", description="RAW (Sony ARW & co.) AI photo editor")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("presets", help="list presets").set_defaults(fn=cmd_presets)
-    sub.add_parser("models", help="download segmentation models").set_defaults(fn=cmd_models)
-    p = sub.add_parser("info", help="camera / exposure metadata")
-    p.add_argument("files", nargs="+"); p.set_defaults(fn=cmd_info)
-    p = sub.add_parser("analyze", help="detect people, light colour, exposure problems; recommend presets")
-    p.add_argument("files", nargs="+"); p.add_argument("--preview-dir")
-    p.set_defaults(fn=cmd_analyze)
-    p = sub.add_parser("edit", help="apply a preset (all settings) and save")
+def _edit_args(p, default_preset):
+    from .sliders import SLIDERS
     p.add_argument("files", nargs="+")
-    p.add_argument("--preset", default="natural")
-    p.add_argument("--set", action="append", metavar="KEY=VALUE", help="override any parameter (repeatable)")
+    p.add_argument("--preset", default=default_preset, help="preset name, or 'none' for defaults only")
+    p.add_argument("--set", action="append", metavar="KEY=VALUE", help="override any internal parameter (repeatable)")
     p.add_argument("--params", help="JSON file of parameter overrides")
+    g = p.add_argument_group("sliders (regular editing / التعديل العادي)")
+    for k, (ar, rng, _) in SLIDERS.items():
+        g.add_argument("--" + k.replace("_", "-"), dest=k, metavar="V", help=f"{ar}: {rng}")
+    g.add_argument("--hsl", action="append", metavar="COLOUR:hue=..,sat=..,lum=..",
+                   help="per-colour adjustment, e.g. --hsl orange:sat=-10,lum=5 (repeatable)")
     p.add_argument("-o", "--output"); p.add_argument("--out-dir")
     p.add_argument("--tiff", action="store_true", help="16-bit TIFF instead of JPEG")
     p.add_argument("--quality", type=int, default=95)
@@ -214,6 +217,27 @@ def main(argv=None):
     p.add_argument("--report", action="store_true", help="also save a JSON report")
     p.add_argument("--fast", action="store_true", help="half-resolution RAW decode (quick previews)")
     p.set_defaults(fn=cmd_edit)
+
+
+def cmd_sliders(_):
+    from .sliders import describe
+    _print(describe())
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="photo_editor", description="RAW (Sony ARW & co.) AI photo editor")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("presets", help="list presets").set_defaults(fn=cmd_presets)
+    sub.add_parser("sliders", help="list the regular-editing sliders").set_defaults(fn=cmd_sliders)
+    sub.add_parser("models", help="download segmentation models").set_defaults(fn=cmd_models)
+    p = sub.add_parser("info", help="camera / exposure metadata")
+    p.add_argument("files", nargs="+"); p.set_defaults(fn=cmd_info)
+    p = sub.add_parser("analyze", help="detect people, light colour, exposure problems; recommend presets")
+    p.add_argument("files", nargs="+"); p.add_argument("--preview-dir")
+    p.set_defaults(fn=cmd_analyze)
+    _edit_args(sub.add_parser("edit", help="apply a preset (all settings) and save"), "natural")
+    _edit_args(sub.add_parser("adjust", help="regular editing: WB, exposure, contrast, colour, sharpness (sliders)"),
+               "standard")
     p = sub.add_parser("preview", help="RAW -> viewable JPEG (to look at the photo)")
     p.add_argument("files", nargs="+"); p.add_argument("--out-dir")
     p.add_argument("--size", type=int, default=1600)
@@ -226,7 +250,7 @@ def main(argv=None):
     p.add_argument("--cols", type=int)
     p.set_defaults(fn=cmd_grid)
     a = ap.parse_args(argv)
-    if a.cmd == "edit" and a.preset in ("none", "custom"):
+    if a.cmd in ("edit", "adjust") and a.preset in ("none", "custom"):
         a.preset = None
     a.fn(a)
 

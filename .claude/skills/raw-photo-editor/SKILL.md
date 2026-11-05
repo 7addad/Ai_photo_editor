@@ -1,6 +1,6 @@
 ---
 name: raw-photo-editor
-description: Read and edit RAW photos - Sony ARW/SR2/SRF, Canon CR2/CR3, Nikon NEF, Fuji RAF, DNG, ORF, RW2 and all LibRaw formats - plus JPEG/PNG/TIFF. Converts RAW to viewable JPEG, detects people and separates them from the background, fixes white balance to natural, corrects exposure and colour, retouches faces (pimples/blemishes, redness, skin evening, dark circles, shine, teeth, eyes), and applies presets that change every setting at once, including a beauty-only mode that keeps the photo exactly as shot. Use whenever the user uploads or names a photo or RAW file and wants it viewed, analysed, enhanced, white-balanced, colour-graded, retouched, or the person isolated (Arabic too - تعديل صورة، صيغة ARW، توازن اللون الأبيض، عزل الشخص، إزالة الحبوب والبثور، الاحمرار، تجميل الوجه).
+description: Read and edit RAW photos - Sony ARW/SR2/SRF, Canon CR2/CR3, Nikon NEF, Fuji RAF, DNG, ORF, RW2 and all LibRaw formats - plus JPEG/PNG/TIFF. Converts RAW to viewable JPEG, detects people and separates them from the background, fixes white balance to natural, does regular editing with Lightroom-style sliders (white balance/temperature, exposure, contrast, highlights, shadows, colour, HSL, sharpness, clarity, noise), retouches faces (pimples/blemishes, redness, skin evening, dark circles, shine, teeth, eyes), and applies presets that change every setting at once, including a beauty-only mode that keeps the photo exactly as shot. Use whenever the user uploads or names a photo or RAW file and wants it viewed, analysed, enhanced, white-balanced, colour-graded, retouched, or the person isolated (Arabic too - تعديل صورة، تعديل عادي، تباين، حدة، صيغة ARW، توازن اللون الأبيض، عزل الشخص، إزالة الحبوب والبثور، الاحمرار، تجميل الوجه).
 ---
 
 # RAW photo editor - محرر صور RAW وتجميل الوجه
@@ -61,6 +61,7 @@ separation, face retouch, detail, effects).
 
 | preset | العربية | what it does |
 |---|---|---|
+| `standard` | تعديل عادي | classic edit only: WB, exposure, contrast, colour, sharpness, noise - no background change, no face retouch |
 | `beauty_only` | تجميل فقط (الصورة كما هي) | photo stays exactly as shot - only faces are retouched |
 | `natural` | طبيعي | true colours, natural WB, light separation, light retouch (default) |
 | `portrait_pop` | بورتريه بارز | blurred darker background, crisp subject, retouch |
@@ -91,7 +92,41 @@ several input files = batch. Outputs: the image (full resolution, EXIF kept),
 `_compare.jpg` (as shot | edited), `_masks.jpg` (people/skin), `_faces.jpg`
 (retouch regions per face).
 
-## 5. Overrides - map the user's words to parameters (`--set key=value`)
+## 5. Regular editing - التعديل العادي (sliders)
+
+For a normal photo edit (no AI separation, no retouch) use `adjust` (= `edit`
+with the `standard` preset). Every slider also works on `edit` with any preset
+and always wins over the preset.
+
+```bash
+python -m photo_editor adjust /path/DSC01234.ARW --contrast 25 --temperature 5200 --tint 5 \
+    --highlights -40 --shadows 30 --vibrance 20 --sharpness 70 --clarity 15 -o /out/DSC01234_edit.jpg --compare
+python -m photo_editor sliders        # list all sliders with Arabic names and ranges
+```
+
+| slider | العربية | range |
+|---|---|---|
+| `--wb` | توازن الأبيض | `auto` (natural, default) / `camera` / `daylight` |
+| `--temperature` | درجة حرارة الإضاءة | Kelvin 2000..12000 — the light in the scene; lower = picture becomes cooler (like Lightroom) |
+| `--warmth` | الدفء | -100..100 on top of auto WB (+ warmer) |
+| `--tint` | الصبغة | -100..100 (+ magenta, - green) |
+| `--exposure` | التعريض | EV -5..5 (added to auto exposure; `--auto-exposure off` to disable) |
+| `--contrast` | التباين | -100..100 |
+| `--highlights` / `--shadows` | الإضاءات / الظلال | -100..100 |
+| `--whites` / `--blacks` | الأبيض / الأسود | -100..100 |
+| `--vibrance` / `--saturation` | الحيوية / التشبع | -100..100 (`--saturation -100` = black & white) |
+| `--sharpness` | الحدة | 0..150 |
+| `--clarity` / `--texture` | الوضوح / الملمس | -100..100 |
+| `--noise-reduction` | إزالة التشويش | 0..100 (default: automatic from ISO) |
+| `--vignette` / `--grain` | التظليل / الحبيبات | -100..100 / 0..100 |
+| `--hsl` | تدرج الألوان | `--hsl orange:hue=5,sat=-10,lum=10` (red orange yellow green aqua blue purple magenta) |
+
+Typical requests: "more contrast" → `--contrast 25`; "sharper" → `--sharpness 80`;
+"colours stronger" → `--vibrance 30`; "white balance natural" → `--wb auto`;
+"photo too yellow" → `--warmth -30` (or `--temperature 3500`); "darker sky" →
+`--hsl blue:lum=-30 --highlights -50`.
+
+## 6. Overrides - map the user's words to parameters (`--set key=value`)
 
 **Face beauty (تجميل الوجه)** - `retouch` is the master strength 0..1
 (0.3 light, 0.6 normal, 0.9 strong); each step can be set on its own:
@@ -125,7 +160,7 @@ several input files = batch. Outputs: the image (full resolution, EXIF kept),
 
 Full list: `photo_editor/presets.py` (`DEFAULTS`).
 
-## 6. Verify before delivering
+## 7. Verify before delivering
 
 Look at `_compare.jpg`, and for retouching crop/zoom the face area of the
 result (e.g. with PIL) to check at 100%:

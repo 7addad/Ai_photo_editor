@@ -120,3 +120,25 @@ def test_beauty_only_keeps_colours():
                        faces=[], backend="test")
     res = process(data, presets.resolve("beauty_only", {"retouch": 0.0}), seg=seg)
     assert np.abs(res.srgb - img).max() < 1e-3          # nothing but retouch may change
+
+
+# ---------------------------------------------------------------- regular editing sliders
+
+def test_sliders_mapping_and_direction():
+    from photo_editor.sliders import parse_hsl, sliders_to_params
+    p = sliders_to_params({"contrast": 50, "temperature": 3200, "sharpness": 80, "saturation": -100, "vignette": -50})
+    assert p["contrast"] == pytest.approx(0.3) and p["wb_mode"] == "kelvin" and p["wb_kelvin"] == 3200
+    assert p["sharpen"] == pytest.approx(0.8) and p["monochrome"] is True and p["vignette"] > 0
+    assert parse_hsl(["orange:hue=5,sat=-20"]) == {"hue_orange": 5.0, "sat_orange": -0.2}
+    with pytest.raises(KeyError):
+        sliders_to_params({"nope": 1})
+
+    lin = _scene()
+    seg = Segmentation(person=np.zeros(lin.shape[:2], np.float32), skin=np.zeros(lin.shape[:2], np.float32),
+                       faces=[], backend="test")
+    run = lambda s: process(_data(lin.copy()), presets.resolve("standard", sliders_to_params(s)), seg=seg).srgb
+    base = run({})
+    assert run({"exposure": 1}).mean() > base.mean() + 0.03
+    warm = run({"warmth": 60}).reshape(-1, 3).mean(0)
+    assert warm[0] - warm[2] > base.reshape(-1, 3).mean(0)[0] - base.reshape(-1, 3).mean(0)[2]
+    assert run({"contrast": 60}).std() > base.std()

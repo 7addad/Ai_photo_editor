@@ -67,6 +67,17 @@ PRESETS: dict[str, dict] = {
         "description_ar": "تبقى الصورة كما هي تمامًا (الألوان والإضاءة والخلفية دون تغيير) ويُعدَّل الوجه فقط: إزالة البثور والحبوب، تخفيف الاحمرار، توحيد البشرة، الهالات، اللمعان، تبييض الأسنان، بياض العين.",
         "params": {"keep_original": True, "retouch": 0.7},
     },
+    "standard": {
+        "label_ar": "تعديل عادي",
+        "description": "Classic photo edit only: white balance, exposure, contrast, highlights/shadows, colour, sharpness and noise. No background changes, no face retouch. Fine-tune with the sliders.",
+        "description_ar": "تعديل كلاسيكي فقط: توازن الأبيض، التعريض، التباين، الإضاءات والظلال، الألوان، الحدة وإزالة التشويش. بدون تغيير الخلفية وبدون تجميل الوجه، ويمكن ضبط كل شريط يدويًا.",
+        "params": {
+            "separate_subject": False, "retouch": 0.0,
+            "wb_strength": 1.0, "contrast": 0.15, "highlights": -0.35, "shadows": 0.3,
+            "vibrance": 0.18, "saturation": 0.03, "clarity": 0.08, "texture": 0.04,
+            "sharpen": 0.55, "vignette": 0.0, "skin_tone": 0.2,
+        },
+    },
     "natural": {
         "label_ar": "طبيعي",
         "description": "Neutral, true-to-life colours. Auto white balance fully corrected, people slightly separated from the background.",

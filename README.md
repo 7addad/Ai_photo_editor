@@ -71,6 +71,7 @@ report = edit("DSC01234.ARW", preset="natural", output="out.jpg", bg_blur=0.3, w
 
 | preset | الاسم | الوصف |
 |---|---|---|
+| `standard` | تعديل عادي | توازن أبيض، تعريض، تباين، ألوان، حدة - بدون تغيير الخلفية أو الوجه |
 | `beauty_only` | تجميل فقط | الصورة كما هي تمامًا، ويُعدَّل الوجه فقط |
 | `natural` | طبيعي | ألوان حقيقية، توازن أبيض تلقائي كامل، فصل خفيف للأشخاص عن الخلفية |
 | `portrait_pop` | بورتريه بارز | خلفية مموهة وأغمق، وضوح أعلى للشخص، بشرة صحية |
@@ -84,6 +85,32 @@ report = edit("DSC01234.ARW", preset="natural", output="out.jpg", bg_blur=0.3, w
 | `bw_classic` | أبيض وأسود | أبيض وأسود غني |
 
 كل إعداد يمكن تعديله بـ `--set key=value`؛ القائمة الكاملة في `photo_editor/presets.py`.
+
+## التعديل العادي / Regular editing
+
+تعديل كلاسيكي بأشرطة مثل Lightroom، بدون فصل الخلفية وبدون تجميل:
+
+```bash
+python -m photo_editor adjust DSC01234.ARW --contrast 25 --temperature 5200 --highlights -40 \
+    --shadows 30 --vibrance 20 --sharpness 70 --clarity 15 --compare
+python -m photo_editor sliders     # قائمة كل الأشرطة ونطاقاتها
+```
+
+| الشريط | النطاق |
+|---|---|
+| `--wb` توازن الأبيض | `auto` / `camera` / `daylight` |
+| `--temperature` درجة الحرارة | 2000..12000 كلفن |
+| `--warmth` الدفء، `--tint` الصبغة | -100..100 |
+| `--exposure` التعريض | -5..5 EV |
+| `--contrast` التباين، `--highlights` الإضاءات، `--shadows` الظلال، `--whites` الأبيض، `--blacks` الأسود | -100..100 |
+| `--vibrance` الحيوية، `--saturation` التشبع | -100..100 |
+| `--sharpness` الحدة | 0..150 |
+| `--clarity` الوضوح، `--texture` الملمس | -100..100 |
+| `--noise-reduction` إزالة التشويش | 0..100 |
+| `--vignette` التظليل، `--grain` الحبيبات | -100..100 / 0..100 |
+| `--hsl` تدرج كل لون | `--hsl orange:hue=5,sat=-10,lum=10` |
+
+الأشرطة تعمل أيضًا مع أي إعداد جاهز: `edit --preset portrait_pop --contrast 10 --sharpness 80`.
 
 ## تجميل الوجه / Face retouch
 
