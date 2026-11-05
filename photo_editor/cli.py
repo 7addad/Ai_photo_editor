@@ -1,8 +1,10 @@
 """Command line interface.
 
   python -m photo_editor presets
+  python -m photo_editor preview  PHOTO.ARW            (RAW -> JPEG you can look at)
   python -m photo_editor info     PHOTO.ARW
   python -m photo_editor analyze  PHOTO.ARW [--preview-dir out/]
+  python -m photo_editor edit     PHOTO.ARW --preset beauty_only     (as shot, faces retouched only)
   python -m photo_editor edit     PHOTO.ARW --preset natural [--set warmth=10 ...] [-o out.jpg]
                                   [--compare] [--masks] [--tiff] [--fast]
   python -m photo_editor grid     PHOTO.ARW [-o presets.jpg]   (all presets on one sheet)
@@ -110,6 +112,11 @@ def cmd_edit(a):
             m_path = base + "_masks.jpg"
             save_image(to_preview(mask_overlay(res.srgb, res.seg)), m_path, quality=88)
             res.report["masks"] = m_path
+            if (res.report.get("retouch") or {}).get("enabled"):
+                from .face_landmarks import draw_faces, find_faces
+                f_path = base + "_faces.jpg"
+                save_image(to_preview(draw_faces(res.srgb, find_faces(res.srgb, res.seg.faces))), f_path, quality=88)
+                res.report["faces_overlay"] = f_path
         if a.preview:
             pv = base + "_preview.jpg"
             save_image(to_preview(res.srgb, 1600), pv, quality=88)
@@ -119,8 +126,8 @@ def cmd_edit(a):
         if a.report:
             with open(base + "_report.json", "w") as fh:
                 json.dump(res.report, fh, ensure_ascii=False, indent=2, default=_json)
-        reports.append({k: res.report.get(k) for k in ("output", "compare", "masks", "preview", "preset",
-                                                        "people", "white_balance", "exposure_ev", "denoise",
+        reports.append({k: res.report.get(k) for k in ("output", "compare", "masks", "faces_overlay", "preview", "preset",
+                                                        "mode", "people", "retouch", "white_balance", "exposure_ev", "denoise",
                                                         "output_stats", "timing_s")})
     _print(reports if len(reports) > 1 else reports[0])
 
@@ -156,6 +163,33 @@ def cmd_grid(a):
     _print({"grid": out, "order": [t[0] for t in tiles], "people": seg.people_count})
 
 
+def cmd_preview(a):
+    """Convert RAW (ARW...) to a viewable JPEG: the camera's embedded preview
+    when it is large enough, else a quick half-size render.  Claude cannot
+    look at RAW files directly - view this JPEG instead."""
+    from .pipeline import render_before
+    from .raw_io import embedded_preview, is_raw, load_image, save_image, to_preview
+    out = []
+    for f in a.files:
+        stem = os.path.splitext(os.path.basename(f))[0]
+        dst = os.path.join(a.out_dir or os.path.dirname(os.path.abspath(f)), stem + "_view.jpg")
+        how = None
+        if is_raw(f) and not a.render:
+            im = embedded_preview(f)
+            if im is not None and max(im.size) >= min(a.size, 1000):
+                im = im.convert("RGB")
+                im.thumbnail((a.size, a.size))
+                os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+                im.save(dst, quality=90)
+                how = "embedded camera preview"
+        if how is None:
+            data = load_image(f, half_size=True)
+            save_image(to_preview(render_before(data), a.size), dst, quality=90)
+            how = "rendered from RAW (camera white balance)" if data.is_raw else "resized"
+        out.append({"file": f, "view": dst, "source": how})
+    _print(out if len(out) > 1 else out[0])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="photo_editor", description="RAW (Sony ARW & co.) AI photo editor")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -180,6 +214,11 @@ def main(argv=None):
     p.add_argument("--report", action="store_true", help="also save a JSON report")
     p.add_argument("--fast", action="store_true", help="half-resolution RAW decode (quick previews)")
     p.set_defaults(fn=cmd_edit)
+    p = sub.add_parser("preview", help="RAW -> viewable JPEG (to look at the photo)")
+    p.add_argument("files", nargs="+"); p.add_argument("--out-dir")
+    p.add_argument("--size", type=int, default=1600)
+    p.add_argument("--render", action="store_true", help="render from RAW data instead of the embedded preview")
+    p.set_defaults(fn=cmd_preview)
     p = sub.add_parser("grid", help="preview all presets side by side on one image")
     p.add_argument("file"); p.add_argument("-o", "--output")
     p.add_argument("--presets", help="comma-separated subset")

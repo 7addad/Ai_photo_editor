@@ -9,6 +9,20 @@ An AI photo editor for RAW files (Sony ARW and every format LibRaw reads) and
 regular images: people detection & subject/background separation, natural auto
 white balance, exposure, colour, and one-click presets that set every parameter.
 
+## تثبيت المهارة في Claude / Install the skill
+
+**في claude.ai أو Claude Desktop (المحادثة العادية):**
+
+1. حمّل الملف [`dist/raw-photo-editor.zip`](dist/raw-photo-editor.zip) من هذا الفرع.
+2. في Claude: **Settings ← Capabilities**، فعّل **Code execution and file creation**.
+3. في نفس الصفحة، قسم **Skills** ← **Upload skill** ← اختر الملف المضغوط.
+4. افتح محادثة جديدة وارفع صورة ARW واكتب مثلًا: "عدّل الصورة تجميل فقط وأزل الحبوب".
+
+**في Claude Code:** المهارة موجودة في `.claude/skills/raw-photo-editor/SKILL.md`
+(مجلد مخفي يبدأ بنقطة) وتعمل تلقائيًا عند فتح هذا المستودع.
+
+لإعادة بناء الملف المضغوط بعد أي تعديل: `python tools/build_skill.py`
+
 ## الصيغ المدعومة / Supported formats
 
 Sony `ARW` `SR2` `SRF` · Canon `CR2` `CR3` `CRW` · Nikon `NEF` `NRW` · Fujifilm `RAF` ·
@@ -32,6 +46,12 @@ python -m photo_editor analyze DSC01234.ARW --preview-dir output/
 # 2) معاينة كل الإعدادات الجاهزة في صورة واحدة للاختيار
 python -m photo_editor grid DSC01234.ARW -o output/presets.jpg
 
+# 0) تحويل RAW إلى JPEG للعرض
+python -m photo_editor preview DSC01234.ARW --out-dir output/
+
+# تجميل فقط: الصورة كما هي (ألوان وإضاءة وخلفية) مع تعديل الوجه فقط
+python -m photo_editor edit DSC01234.ARW --preset beauty_only --set retouch=0.8 --compare
+
 # 3) التعديل بإعداد جاهز (يغير كل الإعدادات) + تعديلات إضافية اختيارية
 python -m photo_editor edit DSC01234.ARW --preset natural --out-dir output/ --compare --masks
 python -m photo_editor edit DSC01234.ARW --preset portrait_pop --set warmth=8 --set bg_blur=0.6
@@ -51,6 +71,7 @@ report = edit("DSC01234.ARW", preset="natural", output="out.jpg", bg_blur=0.3, w
 
 | preset | الاسم | الوصف |
 |---|---|---|
+| `beauty_only` | تجميل فقط | الصورة كما هي تمامًا، ويُعدَّل الوجه فقط |
 | `natural` | طبيعي | ألوان حقيقية، توازن أبيض تلقائي كامل، فصل خفيف للأشخاص عن الخلفية |
 | `portrait_pop` | بورتريه بارز | خلفية مموهة وأغمق، وضوح أعلى للشخص، بشرة صحية |
 | `soft_portrait` | بورتريه ناعم | تباين منخفض، سواد مرفوع، بشرة دافئة وناعمة |
@@ -63,6 +84,24 @@ report = edit("DSC01234.ARW", preset="natural", output="out.jpg", bg_blur=0.3, w
 | `bw_classic` | أبيض وأسود | أبيض وأسود غني |
 
 كل إعداد يمكن تعديله بـ `--set key=value`؛ القائمة الكاملة في `photo_editor/presets.py`.
+
+## تجميل الوجه / Face retouch
+
+`retouch` = القوة العامة (0 إلى 1)، ويمكن ضبط كل خطوة وحدها:
+
+| المعامل | ماذا يفعل |
+|---|---|
+| `retouch_blemish` | إزالة الحبوب والبثور والبقع الصغيرة مع الحفاظ على ملمس البشرة |
+| `retouch_redness` | تخفيف الاحمرار والتهيج وتوحيده مع لون الوجه |
+| `retouch_smooth` | توحيد البشرة (فصل الترددات) مع إبقاء المسام |
+| `retouch_under_eye` | تفتيح الهالات السوداء وإزالة لونها المزرق |
+| `retouch_shine` | تخفيف لمعان البشرة الدهنية |
+| `retouch_teeth` | تبييض الأسنان |
+| `retouch_eyes` | إزالة احمرار بياض العين |
+
+يعتمد على 478 نقطة لملامح الوجه (MediaPipe) لتحديد العينين والحاجبين والشفاه
+والأنف واستثنائها، أو على نموذج YuNet المرفق إن لم تتوفر MediaPipe. ما خارج
+بشرة الوجه لا يتغير أبدًا.
 
 ## كيف يعمل / How it works
 

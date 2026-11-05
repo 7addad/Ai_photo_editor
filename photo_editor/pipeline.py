@@ -104,8 +104,12 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
     p = dict(params)
     rep: dict = {"input": data.meta}
 
+    if p.get("keep_original"):
+        return _beauty_only(data, p, seg, rep, t0)
+
     # 1. people / skin
-    use_people = need_seg and (p.get("separate_subject", True) or p.get("wb_mode") == "auto")
+    use_people = need_seg and (p.get("separate_subject", True) or p.get("wb_mode") == "auto"
+                               or float(p.get("retouch", 0) or 0) > 0)
     if seg is None and use_people:
         seg = segment(data)
     person = seg.person if seg is not None and seg.has_people else None
@@ -173,10 +177,44 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
         srgb = adj.local_contrast(srgb, 1.0, max(H, W) * 0.012, mask=amt)
     if abs(float(p.get("texture", 0))) > 1e-3:
         srgb = adj.local_contrast(srgb, float(p["texture"]), max(H, W) * 0.002)
+    srgb, rep["retouch"] = apply_retouch(srgb, p, seg)
     srgb = adj.sharpen(srgb, float(p.get("sharpen", 0)), radius=max(0.7, max(H, W) / 5000))
     srgb = adj.film_grain(srgb, float(p.get("grain", 0)))
 
     rep["timing_s"] = {"segmentation": round(t_seg - t0, 2), "total": round(time.time() - t0, 2)}
+    rep["output_stats"] = image_stats(srgb)
+    return Result(srgb=np.clip(srgb, 0, 1).astype(np.float32), params=p, report=rep, seg=seg)
+
+
+def apply_retouch(srgb: np.ndarray, p: dict, seg: Segmentation | None):
+    """Face beauty retouch (blemishes, redness, smoothing, under-eye, shine,
+    teeth, eyes) on the display image."""
+    from .retouch import retouch, strengths
+    if max(strengths(p).values()) <= 0:
+        return srgb, {"enabled": False}
+    from .face_landmarks import find_faces
+    boxes = seg.faces if seg is not None and seg.faces else None
+    faces = find_faces(srgb, boxes)
+    skin = seg.skin if seg is not None and seg.has_people else None
+    out, rep = retouch(srgb, faces, p, skin=skin)
+    rep["enabled"] = True
+    return out, rep
+
+
+def _beauty_only(data: ImageData, p: dict, seg: Segmentation | None, rep: dict, t0: float) -> Result:
+    """'Keep the photo as it is' mode: no white balance, exposure, colour,
+    background or detail changes - only the face retouch.  JPEG/PNG/TIFF
+    pixels outside the retouched skin stay identical; RAW files are rendered
+    with the camera's own as-shot white balance."""
+    before = render_before(data)
+    if seg is None:
+        seg = segment(data)
+    srgb, rep["retouch"] = apply_retouch(before, p, seg)
+    if p.get("skin_smooth") and seg.has_people:
+        srgb = adj.skin_smooth(srgb, seg.skin, float(p["skin_smooth"]))
+    rep["mode"] = "keep_original (beauty only)"
+    rep["people"] = {"detected": bool(seg.has_people), "faces": seg.people_count, "backend": seg.backend}
+    rep["timing_s"] = {"total": round(time.time() - t0, 2)}
     rep["output_stats"] = image_stats(srgb)
     return Result(srgb=np.clip(srgb, 0, 1).astype(np.float32), params=p, report=rep, seg=seg)
 
