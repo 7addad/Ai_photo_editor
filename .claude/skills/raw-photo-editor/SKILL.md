@@ -1,6 +1,6 @@
 ---
 name: raw-photo-editor
-description: Read and edit RAW photos - Sony ARW/SR2/SRF, Canon CR2/CR3, Nikon NEF, Fuji RAF, DNG, ORF, RW2 and all LibRaw formats - plus JPEG/PNG/TIFF. Converts RAW to viewable JPEG, detects people and separates them from the background, fixes white balance to natural, does regular editing with Lightroom-style sliders (white balance/temperature, exposure, contrast, highlights, shadows, colour, HSL, sharpness, clarity, noise), retouches faces (pimples/blemishes, redness, skin evening, dark circles, shine, teeth, eyes), and applies presets that change every setting at once, including a beauty-only mode that keeps the photo exactly as shot. Use whenever the user uploads or names a photo or RAW file and wants it viewed, analysed, enhanced, white-balanced, colour-graded, retouched, or the person isolated (Arabic too - تعديل صورة، تعديل عادي، تباين، حدة، صيغة ARW، توازن اللون الأبيض، عزل الشخص، إزالة الحبوب والبثور، الاحمرار، تجميل الوجه).
+description: Read and edit RAW photos (Sony ARW, CR2/CR3, NEF, RAF, DNG, ORF, RW2 and all LibRaw formats) plus JPEG/PNG/TIFF with every Lightroom setting (basic, tone curve, HSL, colour grading, detail, lens, transform, crop, effects, calibration, sky/subject/background masks) and face retouching. The user picks a category (wedding, portrait, landscape, sunset, sea, night, street, food, product, cinematic, moody, vintage film, B&W, HDR ...) and the adaptive engine tunes all settings to that specific photo's light, colours, sky, people and content; exports Lightroom XMP presets. Also beauty-only and regular slider editing. Use whenever the user uploads or names a photo and wants it viewed, edited, styled, retouched or converted to a look (Arabic too - تعديل صورة، فئة، ستايل، لايت روم، تعديل عادي، صيغة ARW، توازن الأبيض، عزل الشخص، إزالة الحبوب، تجميل الوجه).
 ---
 
 # RAW photo editor - محرر صور RAW وتجميل الوجه
@@ -42,7 +42,75 @@ python -m photo_editor preview /path/DSC01234.ARW --out-dir /tmp/pe
 # -> /tmp/pe/DSC01234_view.jpg  (camera's embedded preview, or a quick render)
 ```
 
-## 2. Analyse
+## 2. Main workflow - categories (الفئات) + adaptive settings
+
+The user chooses **where the photo should go** (a category); the engine
+measures **this** photo (light colour, exposure, contrast, palette, sky,
+haze, people/faces, lines/tilt, ISO noise) and computes every Lightroom
+setting for it, then renders previews and self-corrects (up to 3 passes)
+until brightness, contrast, black/white points and colour reach the
+category's look - with face highlights protected.
+
+1. Convert & look at the photo (step 1), and decide yourself **what it shows**
+   (portrait, group, landscape, sea, sunset, architecture, interior, night,
+   street, food, product, animal, event). This is your `--subject` hint.
+2. If the user has not named a category, show the options. List them
+   (`python -m photo_editor categories`) grouped, and/or render a visual sheet:
+   `python -m photo_editor grid PHOTO --categories natural,portrait,wedding,cinematic,moody,bw -o /tmp/pe/cats.jpg`
+   (`--categories` alone renders all 22 - slow, ~2 min). Ask with
+   AskUserQuestion offering the 3-4 best fits for this photo + "Other".
+3. Run the adaptive edit:
+
+```bash
+python -m photo_editor auto /path/PHOTO.ARW --category wedding --subject portrait \
+       -o /out/PHOTO_wedding.jpg --compare --xmp
+```
+
+   Output JSON: `settings` (every Lightroom value used), `why` (Arabic
+   reasons, one line per decision - relay them to the user), `check`
+   (measured vs target per pass), `applied` (final EV, white balance K,
+   geometry, retouch), `lightroom` (XMP file + what Lightroom can't do).
+   `--plan-only` computes settings without rendering; `--fast` for quick looks.
+4. Show `_compare.jpg`, explain the main decisions from `why` in the user's
+   language, then refine with any setting on top (they win over the engine):
+   `... --category wedding --exposure 0.3 --sat-orange -10 --crop-aspect 4:5`
+
+| category | العربية | look |
+|---|---|---|
+| natural | طبيعي | true colours, neutral |
+| portrait | بورتريه | warm skin, soft separated background |
+| wedding | أعراس ومناسبات | bright & airy, clean whites |
+| fashion | أزياء وتحريري | crisp, contrasty, cool shadows |
+| family | عائلي وأطفال | cheerful, warm, bright |
+| landscape | طبيعة ومناظر | deep skies, rich greens, haze removed |
+| sunset | غروب وشروق | warm light kept, rich sky |
+| sea | بحر وشاطئ | turquoise water, bright sand |
+| travel | سفر | punchy postcard colours |
+| night | ليل ومدينة | deep blacks, clean lights, low noise |
+| street | شارع ووثائقي | gritty contrast, muted, grain |
+| architecture | عمارة | straight lines, neutral, crisp |
+| interior | ديكور وداخلي | bright neutral interiors |
+| food | طعام | warm, appetising, textured |
+| product | منتجات | pure whites, sharp, neutral |
+| wildlife | حيوانات | fur/feather detail, earthy |
+| cinematic | سينمائي | teal & orange film grade |
+| moody | داكن درامي | dark, muted, dramatic |
+| bright_airy | مشرق وناعم | light, soft, gentle colour |
+| vintage_film | فيلم قديم | faded film, warm highlights, grain |
+| pastel | باستيل | dreamy soft candy colours |
+| hdr | تفاصيل عالية | everything visible, strong local detail |
+| bw | أبيض وأسود | B&W mixed from the photo's colours |
+
+Special modes: `edit --preset beauty_only` (photo as shot, only face
+retouch) and `adjust` (fixed classic edit you drive with sliders).
+
+**Lightroom export**: `--xmp` writes a Lightroom preset next to the output
+(import: Develop > Presets > + > Import Presets); `--xmp sidecar` writes
+`PHOTO.xmp` next to the RAW so Lightroom/Camera Raw opens it already edited.
+Masks (sky/person/background), background blur and face retouch exist only in
+this editor and are listed under `not_in_lightroom_file`.
+
+## 3. Analyse only (optional)
 
 ```bash
 python -m photo_editor analyze /path/DSC01234.ARW --preview-dir /tmp/pe
@@ -54,7 +122,7 @@ light** (K) vs the camera's WB, exposure error (EV), clipping, noise, `issues`,
 Look at the images, then summarise for the user in their language (Arabic if
 they wrote Arabic).
 
-## 3. Offer the options
+## 4. Fixed presets (older, non-adaptive)
 
 Each preset sets **every** parameter (white balance, exposure, tone, colour,
 separation, face retouch, detail, effects).
@@ -80,7 +148,7 @@ Visual choice - all presets on one sheet:
 If the user already said what they want, pick it yourself. Otherwise ask
 (AskUserQuestion when available), offering `beauty_only` + 2-3 recommended presets.
 
-## 4. Edit
+## 5. Edit with a fixed preset
 
 ```bash
 python -m photo_editor edit /path/DSC01234.ARW --preset natural --out-dir /out --compare --masks
@@ -92,7 +160,7 @@ several input files = batch. Outputs: the image (full resolution, EXIF kept),
 `_compare.jpg` (as shot | edited), `_masks.jpg` (people/skin), `_faces.jpg`
 (retouch regions per face).
 
-## 5. Regular editing - التعديل العادي (sliders)
+## 6. Every Lightroom setting - التعديل اليدوي
 
 For a normal photo edit (no AI separation, no retouch) use `adjust` (= `edit`
 with the `standard` preset). Every slider also works on `edit` with any preset
@@ -121,12 +189,29 @@ python -m photo_editor sliders        # list all sliders with Arabic names and r
 | `--vignette` / `--grain` | التظليل / الحبيبات | -100..100 / 0..100 |
 | `--hsl` | تدرج الألوان | `--hsl orange:hue=5,sat=-10,lum=10` (red orange yellow green aqua blue purple magenta) |
 
+All other Lightroom panels are available the same way (`python -m photo_editor sliders --panel <panel>`):
+
+| panel | settings |
+|---|---|
+| Basic / Presence | `--profile` (color vivid landscape portrait neutral standard monochrome), `--dehaze`, `--texture`, `--clarity` |
+| Tone curve | `--curve-highlights --curve-lights --curve-darks --curve-shadows` (-100..100), `--point-curve "0,20; 128,128; 255,240"`, `--point-curve-red/-green/-blue` |
+| HSL | `--hue-<c> --sat-<c> --lum-<c>` for red orange yellow green aqua blue purple magenta (-100..100) |
+| Colour grading | `--cg-shadows-hue 200 --cg-shadows-sat 20 --cg-shadows-lum -5`, same for `midtones`, `highlights`, `global`; `--cg-blending`, `--cg-balance` |
+| B&W | `--monochrome on --bw-red 20 --bw-blue -30 ...` |
+| Detail | `--sharpening --sharpen-radius --sharpen-detail --sharpen-masking --nr-luminance --nr-color` |
+| Lens | `--remove-ca on --defringe 8 --lens-distortion 20 --lens-vignetting 30` |
+| Transform / crop | `--auto-level on --rotate -1.5 --vertical 25 --horizontal -10 --scale 105 --crop-aspect 4:5 --crop-zoom 1.2 --crop-focus 0.4,0.3` |
+| Effects | `--vignette -25 --vignette-midpoint --vignette-feather --vignette-roundness --grain 20 --grain-size --grain-roughness` |
+| Calibration | `--shadow-tint --red-hue --red-sat --green-hue --green-sat --blue-hue --blue-sat` |
+| Masks | `--sky-exposure -0.4 --sky-saturation 20 --sky-warmth 15`, `--subject-exposure 0.2 --subject-clarity --subject-saturation`, `--background-blur 40 --background-exposure -0.3 --background-saturation -15` |
+| Retouch | `--retouch 60`, `--retouch-blemish --retouch-redness --retouch-smooth --retouch-under-eye --retouch-shine --retouch-teeth --retouch-eyes` (0..100) |
+
 Typical requests: "more contrast" → `--contrast 25`; "sharper" → `--sharpness 80`;
 "colours stronger" → `--vibrance 30`; "white balance natural" → `--wb auto`;
 "photo too yellow" → `--warmth -30` (or `--temperature 3500`); "darker sky" →
 `--hsl blue:lum=-30 --highlights -50`.
 
-## 6. Overrides - map the user's words to parameters (`--set key=value`)
+## 7. Overrides - map the user's words to parameters (`--set key=value`)
 
 **Face beauty (تجميل الوجه)** - `retouch` is the master strength 0..1
 (0.3 light, 0.6 normal, 0.9 strong); each step can be set on its own:
@@ -160,7 +245,7 @@ Typical requests: "more contrast" → `--contrast 25`; "sharper" → `--sharpnes
 
 Full list: `photo_editor/presets.py` (`DEFAULTS`).
 
-## 7. Verify before delivering
+## 8. Verify before delivering
 
 Look at `_compare.jpg`, and for retouching crop/zoom the face area of the
 result (e.g. with PIL) to check at 100%:

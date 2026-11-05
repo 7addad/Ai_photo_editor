@@ -3,7 +3,7 @@ from .presets import PRESETS, list_presets, resolve
 from .raw_io import load_image, save_image
 
 __all__ = ["PRESETS", "list_presets", "resolve", "load_image", "save_image", "edit"]
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def edit(path: str, preset: str = "natural", output: str | None = None, sliders: dict | None = None,

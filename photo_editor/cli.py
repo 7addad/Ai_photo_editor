@@ -88,15 +88,14 @@ def cmd_edit(a):
     from .raw_io import load_image, save_image, to_preview
     from .segmentation import mask_overlay
 
-    from .sliders import SLIDERS, parse_hsl, sliders_to_params
+    from .sliders import sliders_to_params
     overrides = {}
     if a.params:
         with open(a.params) as fh:
             overrides.update(json.load(fh))
     overrides.update(_parse_sets(a.set))
     # Lightroom-style sliders win over the preset and --set
-    overrides.update(sliders_to_params({k: getattr(a, k, None) for k in SLIDERS}))
-    overrides.update(parse_hsl(a.hsl))
+    overrides.update(sliders_to_params(_slider_overrides(a)))
     params = resolve(a.preset, overrides)
     reports = []
     for f in a.files:
@@ -150,10 +149,21 @@ def cmd_grid(a):
     data = load_image(a.file, half_size=True)
     data.linear = _downscale(data.linear, a.size)
     seg = segment(data)
-    names = a.presets.split(",") if a.presets else list(PRESETS)
     tiles = [("as shot", render_before(data))]
-    for n in names:
-        tiles.append((n, process(data, resolve(n), seg=seg).srgb))
+    if a.categories:
+        from .categories import CATEGORIES, adapt
+        from .scene import analyze_scene
+        from .sliders import sliders_to_params
+        names = a.categories.split(",") if a.categories != "all" else list(CATEGORIES)
+        stats = analyze_scene(data, seg)
+        for n in names:
+            plan = adapt(data, n, subject=a.subject, seg=seg, passes=2, stats=stats)
+            st = {k: v for k, v in plan["settings"].items() if k not in ("remove_ca",)}
+            tiles.append((n, process(data, resolve(None, sliders_to_params(st)), seg=seg).srgb))
+    else:
+        names = a.presets.split(",") if a.presets else list(PRESETS)
+        for n in names:
+            tiles.append((n, process(data, resolve(n), seg=seg).srgb))
     h, w = tiles[0][1].shape[:2]
     cols = a.cols or (4 if len(tiles) > 6 else 3)
     rows = -(-len(tiles) // cols)
@@ -204,7 +214,7 @@ def _edit_args(p, default_preset):
     p.add_argument("--set", action="append", metavar="KEY=VALUE", help="override any internal parameter (repeatable)")
     p.add_argument("--params", help="JSON file of parameter overrides")
     g = p.add_argument_group("sliders (regular editing / التعديل العادي)")
-    for k, (ar, rng, _) in SLIDERS.items():
+    for k, (_panel, ar, rng, _) in SLIDERS.items():
         g.add_argument("--" + k.replace("_", "-"), dest=k, metavar="V", help=f"{ar}: {rng}")
     g.add_argument("--hsl", action="append", metavar="COLOUR:hue=..,sat=..,lum=..",
                    help="per-colour adjustment, e.g. --hsl orange:sat=-10,lum=5 (repeatable)")
@@ -219,16 +229,85 @@ def _edit_args(p, default_preset):
     p.set_defaults(fn=cmd_edit)
 
 
-def cmd_sliders(_):
+def cmd_sliders(a):
     from .sliders import describe
-    _print(describe())
+    _print(describe(getattr(a, "panel", None)))
+
+
+def cmd_categories(_):
+    from .categories import list_categories
+    _print(list_categories())
+
+
+def _slider_overrides(a) -> dict:
+    """Lightroom-scale settings given on the command line (sliders + --hsl)."""
+    from .sliders import SLIDERS
+    from .presets import parse_value
+    vals = {k: parse_value(getattr(a, k)) for k in SLIDERS if getattr(a, k, None) is not None}
+    for spec in a.hsl or []:
+        band, _, rest = spec.partition(":")
+        for item in rest.split(","):
+            if item.strip():
+                key, _, v = item.partition("=")
+                key = {"saturation": "sat", "luminance": "lum"}.get(key.strip(), key.strip())
+                vals[f"{key}_{band.strip()}"] = float(v)
+    return vals
+
+
+def cmd_auto(a):
+    """Adaptive edit: the chosen category + this photo's own analysis decide
+    every Lightroom setting; then the full-resolution render is saved."""
+    from .categories import adapt
+    from .pipeline import process, render_before, side_by_side
+    from .presets import resolve
+    from .raw_io import load_image, save_image
+    from .sliders import sliders_to_params
+    out_all = []
+    for f in a.files:
+        data = load_image(f, half_size=a.fast)
+        plan = adapt(data, a.category, subject=a.subject, overrides=_slider_overrides(a))
+        result = {"file": f, "category": plan["category"], "category_ar": plan["category_ar"],
+                  "subject": plan["subject"], "settings": plan["settings"], "why": plan["why"],
+                  "check": plan["check"]}
+        if a.show_scene:
+            result["scene"] = plan["scene"]
+        stem = os.path.splitext(os.path.basename(f))[0]
+        base_dir = a.out_dir or os.path.dirname(os.path.abspath(f))
+        out = a.output if (a.output and len(a.files) == 1) else os.path.join(
+            base_dir, f"{stem}_{a.category}{'.tif' if a.tiff else '.jpg'}")
+        if a.save_plan or a.plan_only:
+            plan_path = os.path.splitext(out)[0] + "_settings.json"
+            with open(plan_path, "w", encoding="utf-8") as fh:
+                json.dump(plan["settings"], fh, ensure_ascii=False, indent=2)
+            result["settings_file"] = plan_path
+        if not a.plan_only:
+            res = process(data, resolve(None, sliders_to_params(plan["settings"])))
+            save_image(res.srgb, out, data, quality=a.quality)
+            result["output"] = out
+            result["applied"] = {k: res.report.get(k) for k in ("exposure_ev", "geometry", "retouch", "sky_pct")
+                                 if res.report.get(k) is not None}
+            result["applied"]["white_balance_K"] = res.report.get("white_balance", {}).get("neutralised_light_cct")
+            if a.compare:
+                cp = os.path.splitext(out)[0] + "_compare.jpg"
+                save_image(side_by_side(render_before(data), res.srgb), cp, quality=88)
+                result["compare"] = cp
+            if a.xmp:
+                from .xmp import write_xmp
+                xp = os.path.splitext(f)[0] + ".xmp" if a.xmp == "sidecar" else os.path.splitext(out)[0] + ".xmp"
+                result["lightroom"] = write_xmp(xp, plan["settings"], res.report, data.is_raw,
+                                                preset_name=None if a.xmp == "sidecar" else f"{plan['category_ar']} - {stem}")
+        out_all.append(result)
+    _print(out_all if len(out_all) > 1 else out_all[0])
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="photo_editor", description="RAW (Sony ARW & co.) AI photo editor")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("presets", help="list presets").set_defaults(fn=cmd_presets)
-    sub.add_parser("sliders", help="list the regular-editing sliders").set_defaults(fn=cmd_sliders)
+    p = sub.add_parser("sliders", help="list every Lightroom setting (optionally one panel)")
+    p.add_argument("--panel", help="basic presence tone_curve hsl color_grading bw detail lens transform crop "
+                                   "effects calibration masks retouch")
+    p.set_defaults(fn=cmd_sliders)
     sub.add_parser("models", help="download segmentation models").set_defaults(fn=cmd_models)
     p = sub.add_parser("info", help="camera / exposure metadata")
     p.add_argument("files", nargs="+"); p.set_defaults(fn=cmd_info)
@@ -236,6 +315,19 @@ def main(argv=None):
     p.add_argument("files", nargs="+"); p.add_argument("--preview-dir")
     p.set_defaults(fn=cmd_analyze)
     _edit_args(sub.add_parser("edit", help="apply a preset (all settings) and save"), "natural")
+    p = sub.add_parser("categories", help="list the editing categories (styles)")
+    p.set_defaults(fn=cmd_categories)
+    p = sub.add_parser("auto", help="adaptive edit: choose a category, settings are computed for THIS photo")
+    _edit_args(p, None)
+    p.add_argument("--category", required=True, help="see `categories`")
+    p.add_argument("--subject", help="what the photo shows (portrait, group, landscape, sea, sunset, architecture, "
+                                     "interior, night, street, food, product, animal, event) - overrides the guess")
+    p.add_argument("--plan-only", action="store_true", help="only compute and print the settings")
+    p.add_argument("--save-plan", action="store_true", help="also save the settings as JSON")
+    p.add_argument("--xmp", nargs="?", const="preset", choices=["preset", "sidecar"],
+                   help="write Lightroom XMP (preset next to the output, or sidecar next to the RAW)")
+    p.add_argument("--show-scene", action="store_true", help="include the full scene analysis")
+    p.set_defaults(fn=cmd_auto)
     _edit_args(sub.add_parser("adjust", help="regular editing: WB, exposure, contrast, colour, sharpness (sliders)"),
                "standard")
     p = sub.add_parser("preview", help="RAW -> viewable JPEG (to look at the photo)")
@@ -246,6 +338,9 @@ def main(argv=None):
     p = sub.add_parser("grid", help="preview all presets side by side on one image")
     p.add_argument("file"); p.add_argument("-o", "--output")
     p.add_argument("--presets", help="comma-separated subset")
+    p.add_argument("--categories", nargs="?", const="all",
+                   help="preview adaptive categories instead of presets (all, or comma-separated)")
+    p.add_argument("--subject", help="subject hint for --categories")
     p.add_argument("--size", type=int, default=640, help="long side of each tile")
     p.add_argument("--cols", type=int)
     p.set_defaults(fn=cmd_grid)

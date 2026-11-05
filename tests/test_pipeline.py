@@ -129,7 +129,7 @@ def test_sliders_mapping_and_direction():
     p = sliders_to_params({"contrast": 50, "temperature": 3200, "sharpness": 80, "saturation": -100, "vignette": -50})
     assert p["contrast"] == pytest.approx(0.3) and p["wb_mode"] == "kelvin" and p["wb_kelvin"] == 3200
     assert p["sharpen"] == pytest.approx(0.8) and p["monochrome"] is True and p["vignette"] > 0
-    assert parse_hsl(["orange:hue=5,sat=-20"]) == {"hue_orange": 5.0, "sat_orange": -0.2}
+    assert parse_hsl(["orange:hue=10,sat=-20"]) == {"hue_orange": pytest.approx(3.0), "sat_orange": -0.2}
     with pytest.raises(KeyError):
         sliders_to_params({"nope": 1})
 
@@ -142,3 +142,53 @@ def test_sliders_mapping_and_direction():
     warm = run({"warmth": 60}).reshape(-1, 3).mean(0)
     assert warm[0] - warm[2] > base.reshape(-1, 3).mean(0)[0] - base.reshape(-1, 3).mean(0)[2]
     assert run({"contrast": 60}).std() > base.std()
+
+
+# ---------------------------------------------------------------- Lightroom tools, categories, XMP
+
+def test_lightroom_tools():
+    from photo_editor import lr_tools as lrt
+    lin = _scene()
+    H, W = lin.shape[:2]
+    for out in (lrt.rotate(lin, 3), lrt.perspective(lin, 30, -20, 110), lrt.lens_distortion(lin, 40),
+                lrt.dehaze(lin, 40), lrt.dehaze(lin, -30), lrt.vignette_lr(lin, -50, 40, 60, 20)):
+        assert out.shape == lin.shape and np.isfinite(out).all() and out.min() >= 0
+    x0, y0, x1, y1 = lrt.crop_window(H, W, "1:1", (0.9, 0.5))
+    assert x1 - x0 == y1 - y0 == H and x1 == W
+    srgb = linear_to_srgb(np.clip(lin, 0, 1))
+    curved = lrt.tone_curve(srgb, {"point_curve": "0,30; 128,128; 255,230", "curve_shadows": 30})
+    assert curved.min() >= 30 / 255 - 1e-3 and curved.max() <= 230 / 255 + 1e-3
+    M = lrt.calibration_matrix({"red_hue": 30, "blue_sat": -40})
+    assert np.allclose(M @ np.ones(3), 1, atol=1e-4)
+    assert lrt.sharpen_lr(srgb, 80, 1.2, 40, 50).shape == srgb.shape
+
+
+def test_categories_and_xmp():
+    import xml.etree.ElementTree as ET
+    from photo_editor.categories import CATEGORIES, initial_settings
+    from photo_editor.xmp import build_xmp
+    stats = {"light": {"cct": 3200, "duv": 0, "type": "tungsten", "confidence": 0.8}, "auto_ev": 1.0,
+             "tone": {"L_median": 0.4, "L_p01": 0.05, "L_p99": 0.95, "L_std": 0.2, "chroma": 0.08,
+                      "colourful_pct": 50, "clip_pct": 0.5, "crush_pct": 1.0, "warm_cool": 0.01},
+             "palette_pct": {"red": 10, "orange": 20, "yellow": 10, "green": 30, "aqua": 5, "blue": 20,
+                             "purple": 3, "magenta": 2},
+             "sky": {"pct": 20, "L": 0.9, "blue": 0.03}, "haze": 0.12,
+             "tilt": {"deg": 2.0, "confidence": 0.8, "lines": 12},
+             "people": {"count": 1, "area_pct": 20, "largest_face_pct": 12, "subject_L": 0.4,
+                        "background_L": 0.6, "background_sharpness_ratio": 0.8, "skin_chroma": 0.12},
+             "night": False, "iso": 3200, "is_raw": True, "subject_guess": "portrait"}
+    for name in CATEGORIES:
+        s, why = initial_settings(stats, name)
+        assert why and isinstance(s, dict)
+        sliders = __import__("photo_editor.sliders", fromlist=["sliders_to_params"])
+        sliders.sliders_to_params(s)                        # every key must be a valid setting
+    s, _ = initial_settings(stats, "sunset")
+    assert s["warmth"] > 10                                  # warm light partly kept for sunsets
+    s, _ = initial_settings(stats, "landscape")
+    assert s["auto_level"] and s["sky_exposure"] < 0 and s["dehaze"] > 0
+    xml, skipped = build_xmp(s, {"exposure_ev": 0.7, "white_balance": {"neutralised_light_cct": 3400}})
+    root = ET.fromstring(xml)
+    desc = root.find(".//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description")
+    crs = "{http://ns.adobe.com/camera-raw-settings/1.0/}"
+    assert desc.get(crs + "Temperature") == "3400" and desc.get(crs + "Exposure2012") == "+0.70"
+    assert desc.get(crs + "Dehaze") is not None and "sky_exposure" in skipped

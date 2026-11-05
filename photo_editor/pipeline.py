@@ -104,6 +104,11 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
     p = dict(params)
     rep: dict = {"input": data.meta}
 
+    # 0. geometry: lens corrections, straighten, perspective, crop
+    data, seg, geo = apply_geometry(data, p, seg)
+    if geo:
+        rep["geometry"] = geo
+
     if p.get("keep_original"):
         return _beauty_only(data, p, seg, rep, t0)
 
@@ -128,6 +133,10 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
         T, duv = illuminant_to_cct(1.0 / np.asarray(data.as_shot_gains, np.float64))
         rep["white_balance"]["as_shot_cct"] = round(T)
     lin = data.linear * gains
+    from . import lr_tools as lrt
+    M = lrt.calibration_matrix(p)
+    if M is not None:
+        lin = np.maximum(lin @ M.T, 0).astype(np.float32)
 
     # 3. noise reduction (linear)
     dn = p.get("denoise", "auto")
@@ -135,6 +144,10 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
         dl, dc = auto_denoise(data)
     else:
         dl = dc = float(dn)
+    if p.get("nr_luminance") is not None:
+        dl = float(p["nr_luminance"]) / 100
+    if p.get("nr_color") is not None:
+        dc = float(p["nr_color"]) / 100
     lin = adj.denoise(lin, dl, dc)
     rep["denoise"] = {"luma": round(dl, 2), "chroma": round(dc, 2)}
 
@@ -144,8 +157,19 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
     lin = lin * np.float32(2.0 ** ev)
     rep["exposure_ev"] = round(ev, 2)
 
-    # 5. local tone
+    # 5. dehaze + local tone
+    lin = lrt.dehaze(lin, float(p.get("dehaze", 0) or 0))
     lin = adj.local_tone(lin, float(p.get("highlights", 0)), float(p.get("shadows", 0)))
+
+    # 5b. sky mask (only when a sky adjustment is requested)
+    sky = None
+    if any(abs(float(p.get(k, 0) or 0)) > 1e-3 for k in ("sky_exposure", "sky_saturation", "sky_warmth")):
+        sky = lrt.sky_mask(linear_to_srgb(adj.tone_map(lin)), person)
+        rep["sky_pct"] = round(100 * float(sky.mean()), 1)
+        if sky.max() > 0.05 and abs(float(p.get("sky_exposure", 0) or 0)) > 1e-3:
+            lin = lin * np.exp2(float(p["sky_exposure"]) * sky)[..., None].astype(np.float32)
+        if sky.max() <= 0.05:
+            sky = None
 
     # 6. subject / background separation
     if person is not None and p.get("separate_subject", True):
@@ -154,7 +178,9 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
                                                    "subject_exposure", "subject_clarity", "skin_smooth")}
 
     # 7. vignette + tone map
-    lin = adj.vignette(lin, float(p.get("vignette", 0)))
+    lin = lrt.vignette_lr(lin, -float(p.get("vignette", 0) or 0) / 0.6 * 100,
+                          float(p.get("vignette_midpoint", 50)), float(p.get("vignette_feather", 50)),
+                          float(p.get("vignette_roundness", 0)), float(p.get("vignette_highlights", 0)))
     disp = adj.tone_map(lin, white=float(p.get("tone_white", 8.0)), scene_referred=data.is_raw)
     if data.is_raw:
         p["_base_contrast"] = float(p.get("base_contrast", 0.3))
@@ -163,8 +189,9 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
 
     # 8. look (OKLab)
     sep_person = person if (person is not None and p.get("separate_subject", True)) else None
-    disp = adj.apply_look(disp, p, skin=skin, person=sep_person)
-    srgb = linear_to_srgb(disp)
+    disp = adj.apply_look(disp, p, skin=skin, person=sep_person, sky=sky)
+    srgb = lrt.tone_curve(linear_to_srgb(disp), p)
+    srgb = lrt.defringe(srgb, float(p.get("defringe", 0) or 0))
 
     # 9. detail
     if skin is not None:
@@ -178,12 +205,78 @@ def process(data: ImageData, params: dict, seg: Segmentation | None = None,
     if abs(float(p.get("texture", 0))) > 1e-3:
         srgb = adj.local_contrast(srgb, float(p["texture"]), max(H, W) * 0.002)
     srgb, rep["retouch"] = apply_retouch(srgb, p, seg)
-    srgb = adj.sharpen(srgb, float(p.get("sharpen", 0)), radius=max(0.7, max(H, W) / 5000))
-    srgb = adj.film_grain(srgb, float(p.get("grain", 0)))
+    srgb = lrt.sharpen_lr(srgb, float(p.get("sharpen", 0)) * 100,
+                          radius=float(p.get("sharpen_radius", 1.0)) * max(0.7, max(H, W) / 5000),
+                          detail=float(p.get("sharpen_detail", 25)), masking=float(p.get("sharpen_masking", 0)))
+    srgb = lrt.grain_lr(srgb, float(p.get("grain", 0)) * 100, float(p.get("grain_size", 25)),
+                        float(p.get("grain_roughness", 50)))
 
     rep["timing_s"] = {"segmentation": round(t_seg - t0, 2), "total": round(time.time() - t0, 2)}
     rep["output_stats"] = image_stats(srgb)
     return Result(srgb=np.clip(srgb, 0, 1).astype(np.float32), params=p, report=rep, seg=seg)
+
+
+def apply_geometry(data: ImageData, p: dict, seg: Segmentation | None):
+    """Lens corrections, straighten (rotate / auto-level), perspective, scale
+    and aspect crop, applied to the linear image before anything else."""
+    import dataclasses
+    from . import lr_tools as lrt
+    lin = data.linear
+    rep: dict = {}
+    changed = False
+    if p.get("remove_ca"):
+        lin, rep["chromatic_aberration_scale"] = lrt.remove_chromatic_aberration(lin)
+        changed = True
+    if abs(float(p.get("lens_distortion", 0) or 0)) >= 0.5:
+        lin = lrt.lens_distortion(lin, float(p["lens_distortion"])); changed = True
+    if abs(float(p.get("lens_vignetting", 0) or 0)) >= 0.5:
+        lin = lrt.lens_vignetting(lin, float(p["lens_vignetting"]), float(p.get("lens_vignetting_midpoint", 50)))
+    angle = float(p.get("rotate", 0) or 0)
+    if p.get("auto_level"):
+        a, conf, n = lrt.detect_tilt(_downscale(lin, 1000))
+        rep["auto_level"] = {"detected_deg": round(a, 2), "confidence": round(conf, 2), "lines": n}
+        if conf >= 0.3 and 0.15 <= abs(a) <= 8:
+            angle += a
+    if abs(angle) >= 0.02:
+        lin = lrt.rotate(lin, angle); changed = True
+        rep["rotate_deg"] = round(angle, 2)
+    v, h, sc = (float(p.get(k, d) or d) for k, d in (("vertical", 0), ("horizontal", 0), ("scale", 100)))
+    if abs(v) >= 0.5 or abs(h) >= 0.5 or abs(sc - 100) >= 0.5:
+        lin = lrt.perspective(lin, v, h, sc); changed = True
+        rep["perspective"] = {"vertical": v, "horizontal": h, "scale": sc}
+    if changed:
+        seg = None                       # masks must be recomputed on the new geometry
+    aspect = p.get("crop_aspect")
+    zoom = float(p.get("crop_zoom", 1.0) or 1.0)
+    if (aspect and aspect != "original") or zoom > 1.001:
+        H, W = lin.shape[:2]
+        tmp = dataclasses.replace(data, linear=lin)
+        if seg is None:
+            seg = segment(tmp)
+        focus = p.get("crop_focus", "auto")
+        if isinstance(focus, str) and "," in focus:
+            fx, fy = (float(v) for v in focus.split(","))
+        elif seg.faces:
+            xs = [f[0] + f[2] / 2 for f in seg.faces]; ys = [f[1] + f[3] / 2 for f in seg.faces]
+            fx, fy = float(np.mean(xs)) / W, min(0.9, float(np.mean(ys)) / H + 0.12)
+        elif seg.has_people:
+            yy, xx = np.nonzero(seg.person > 0.5)
+            fx, fy = (xx.mean() / W, yy.mean() / H) if len(xx) else (0.5, 0.5)
+        else:
+            fx, fy = 0.5, 0.5
+        x0, y0, x1, y1 = lrt.crop_window(H, W, aspect, (fx, fy), zoom)
+        lin = lin[y0:y1, x0:x1]
+        seg = Segmentation(person=np.ascontiguousarray(seg.person[y0:y1, x0:x1]),
+                           skin=np.ascontiguousarray(seg.skin[y0:y1, x0:x1]),
+                           faces=[(fx_ - x0, fy_ - y0, fw_, fh_, c) for fx_, fy_, fw_, fh_, c in seg.faces
+                                  if x0 <= fx_ + fw_ / 2 <= x1 and y0 <= fy_ + fh_ / 2 <= y1],
+                           backend=seg.backend)
+        rep["crop"] = {"aspect": aspect or "original", "box": [x0, y0, x1, y1],
+                       "normalised": [round(y0 / H, 4), round(x0 / W, 4), round(y1 / H, 4), round(x1 / W, 4)]}
+        changed = True
+    if lin is data.linear:
+        return data, seg, rep
+    return dataclasses.replace(data, linear=np.ascontiguousarray(lin, dtype=np.float32)), seg, rep
 
 
 def apply_retouch(srgb: np.ndarray, p: dict, seg: Segmentation | None):

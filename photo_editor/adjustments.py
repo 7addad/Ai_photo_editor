@@ -125,7 +125,7 @@ def levels(L: np.ndarray, blacks: float, whites: float) -> np.ndarray:
     if blacks > 0:
         out = blacks * 0.12 + out * (1 - blacks * 0.12)
     elif blacks < 0:
-        b = -blacks * 0.06
+        b = -blacks * 0.14
         out = np.clip((out - b) / (1 - b), 0, None)
     return out.astype(np.float32)
 
@@ -141,8 +141,44 @@ def _hue_weight(h_deg: np.ndarray, centre: float, width: float = 32.0) -> np.nda
     return np.exp(-(d / width) ** 2).astype(np.float32)
 
 
+def _color_grade(L, a, b, p):
+    """Lightroom Color Grading.  New keys (Lightroom scales):
+    cg_<wheel>_hue 0..360 (Lightroom/HSV hue), cg_<wheel>_sat 0..100,
+    cg_<wheel>_lum -100..100 for wheel in shadows/midtones/highlights/global,
+    cg_blending 0..100 (default 50), cg_balance -100..100.
+    Legacy keys grade_<shadows|highlights>_hue (OKLab deg) / _amount (0..1)."""
+    from .lr_tools import lr_hue_to_oklab
+    blend = float(p.get("cg_blending", 50) or 50) / 100
+    bal = float(p.get("cg_balance", 0) or 0) / 100
+    c = 0.5 - 0.18 * bal
+    wdt = 0.12 + 0.3 * blend
+    w_sh = 1 - smoothstep(c - wdt - 0.15, c + wdt * 0.3 - 0.05, L)
+    w_hi = smoothstep(c - wdt * 0.3 + 0.05, c + wdt + 0.15, L)
+    w_mid = np.clip(1 - w_sh - w_hi, 0, 1)
+    wheels = {"shadows": w_sh, "midtones": w_mid, "highlights": w_hi, "global": 1.0}
+    for name, w in wheels.items():
+        sat = float(p.get(f"cg_{name}_sat", 0) or 0)
+        lum = float(p.get(f"cg_{name}_lum", 0) or 0)
+        if sat > 0:
+            hh = np.radians(lr_hue_to_oklab(float(p.get(f"cg_{name}_hue", 0) or 0)))
+            k = w * sat / 100 * 0.12
+            a = a + k * np.cos(hh)
+            b = b + k * np.sin(hh)
+        if lum:
+            L = L + w * lum / 100 * 0.12
+    for key, wfun in (("shadows", lambda x: 1 - smoothstep(0.15, 0.6, x)),
+                      ("highlights", lambda x: smoothstep(0.45, 0.95, x))):
+        amt = float(p.get(f"grade_{key}_amount", 0.0) or 0)
+        if amt:
+            hh = np.radians(float(p.get(f"grade_{key}_hue", 0.0)))
+            w = wfun(L) * amt * 0.06
+            a = a + w * np.cos(hh)
+            b = b + w * np.sin(hh)
+    return a, b, L
+
+
 def apply_look(srgb_lin: np.ndarray, p: dict, skin: np.ndarray | None = None,
-               person: np.ndarray | None = None) -> np.ndarray:
+               person: np.ndarray | None = None, sky: np.ndarray | None = None) -> np.ndarray:
     """Contrast, levels, vibrance/saturation, HSL, split toning, B&W - all in
     OKLab on display-linear input.  Returns display-linear."""
     lab = linear_to_oklab(np.maximum(srgb_lin, 0))
@@ -198,15 +234,22 @@ def apply_look(srgb_lin: np.ndarray, p: dict, skin: np.ndarray | None = None,
     hr = np.radians(h)
     a, b = C * np.cos(hr), C * np.sin(hr)
 
-    # --- split toning / colour grading: (hue degrees, amount) for shadows & highlights
-    for key, wfun in (("shadows", lambda x: 1 - smoothstep(0.15, 0.6, x)),
-                      ("highlights", lambda x: smoothstep(0.45, 0.95, x))):
-        amt = float(p.get(f"grade_{key}_amount", 0.0))
-        if amt:
-            hh = np.radians(float(p.get(f"grade_{key}_hue", 0.0)))
-            w = wfun(L) * amt * 0.06
-            a = a + w * np.cos(hh)
-            b = b + w * np.sin(hh)
+    # --- colour grading (Lightroom wheels: shadows / midtones / highlights / global)
+    a, b, L = _color_grade(L, a, b, p)
+
+    # --- calibration shadow tint (+ magenta / - green)
+    st = float(p.get("shadow_tint", 0) or 0)
+    if st:
+        a = a + st / 100 * 0.025 * (1 - smoothstep(0.1, 0.55, L))
+
+    # --- sky (mask from the pipeline): saturation & warmth
+    if sky is not None:
+        ss = float(p.get("sky_saturation", 0) or 0) / 100
+        sw = float(p.get("sky_warmth", 0) or 0) / 100
+        if ss:
+            a = a * (1 + ss * sky); b = b * (1 + ss * sky)
+        if sw:
+            b = b + sw * 0.04 * sky; a = a + sw * 0.01 * sky
 
     # --- black & white
     if p.get("monochrome"):
