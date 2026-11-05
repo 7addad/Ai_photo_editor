@@ -1,0 +1,6 @@
+numpy>=1.24
+rawpy>=0.19          # LibRaw: Sony ARW/SR2/SRF, CR2/CR3, NEF, RAF, ORF, RW2, DNG, ...
+opencv-python-headless>=4.8
+Pillow>=10.0
+mediapipe>=0.10.14   # people / face / skin segmentation (models auto-downloaded)
+exifread>=3.0        # full EXIF from RAW files (optional but recommended)
