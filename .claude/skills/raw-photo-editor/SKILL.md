@@ -1,146 +1,140 @@
 ---
 name: raw-photo-editor
-description: Read and edit RAW photos (Sony ARW/SR2/SRF, Canon CR2/CR3, Nikon NEF, Fuji RAF, DNG, ORF, RW2 and every LibRaw format) and JPEG/PNG/TIFF. Detects people and separates them from the background, fixes white balance to natural, corrects exposure and colour, and applies presets that change every setting at once. Use whenever the user uploads or names a photo/RAW file and wants it analysed, enhanced, white-balanced, colour-graded, or wants the person isolated/emphasised (Arabic requests too - تعديل صورة، توازن اللون الأبيض، عزل الشخص عن الخلفية، صورة RAW / ARW).
+description: Read and edit RAW photos - Sony ARW/SR2/SRF, Canon CR2/CR3, Nikon NEF, Fuji RAF, DNG, ORF, RW2 and all LibRaw formats - plus JPEG/PNG/TIFF. Converts RAW to viewable JPEG, detects people and separates them from the background, fixes white balance to natural, corrects exposure and colour, retouches faces (pimples/blemishes, redness, skin evening, dark circles, shine, teeth, eyes), and applies presets that change every setting at once, including a beauty-only mode that keeps the photo exactly as shot. Use whenever the user uploads or names a photo or RAW file and wants it viewed, analysed, enhanced, white-balanced, colour-graded, retouched, or the person isolated (Arabic too - تعديل صورة، صيغة ARW، توازن اللون الأبيض، عزل الشخص، إزالة الحبوب والبثور، الاحمرار، تجميل الوجه).
 ---
 
-# RAW photo editor - مهارة تعديل صور RAW
+# RAW photo editor - محرر صور RAW وتجميل الوجه
 
-The editing engine lives in this repository as the Python package `photo_editor`
-(run every command from the repository root). It decodes RAW files linearly with
-LibRaw, so white balance and exposure are corrected on real sensor data, not on a
-baked JPEG.
-
-## 0. One-time setup
+The engine is the Python package `photo_editor`. It is located either
+**next to this SKILL.md** (skill uploaded to claude.ai as a zip) or at the
+**repository root** (Claude Code in the Ai_photo_editor repo). Set `PE` to the
+folder that contains the `photo_editor/` directory and run everything as:
 
 ```bash
-pip install -r requirements.txt
-python -m photo_editor models        # downloads the people/face/skin models (~20 MB)
+PE="<folder containing photo_editor/>"     # e.g. the folder of this SKILL.md, or the repo root
+cd "$PE" && python -m photo_editor <command> ...
 ```
 
-If MediaPipe fails with `libEGL.so.1` / `libGLES` missing (headless Linux):
-`apt-get install -y libegl1 libgles2`. Without MediaPipe the editor still works
-but falls back to weaker OpenCV people detection - tell the user if that happens
-(the report shows `"backend": "opencv:..."`).
+Use absolute paths for input and output files. On claude.ai, uploaded files are
+usually in `/mnt/user-data/uploads/`; save results in `/mnt/user-data/outputs/`
+so the user can download them.
 
-## 1. Analyse first
+## 0. Setup (once per session)
 
 ```bash
-python -m photo_editor analyze PHOTO.ARW --preview-dir output/
+pip install rawpy numpy opencv-python-headless pillow exifread   # required
+pip install mediapipe                                              # recommended (better people/face masks)
 ```
 
-Returns JSON with camera/lens/ISO/shutter, **people** (faces, % of frame), the
-**estimated light colour** (CCT in K + light type) vs the camera's as-shot WB,
-exposure error in EV, clipping, noise level, a list of `issues` and
-`recommended_presets`. It also writes `output/<name>_asshot.jpg` and, if people
-were found, `output/<name>_people_mask.jpg` (people tinted green, skin orange,
-face boxes yellow).
+Add `--break-system-packages` if pip refuses. If MediaPipe fails to load
+(`libEGL.so.1`), try `apt-get install -y libegl1 libgles2`; if that is not
+possible just continue - the editor falls back to OpenCV automatically (face
+retouch still works through the bundled YuNet face model, people masks are
+coarser). The report field `backend` shows which was used.
 
-**Always look at the preview images with the Read tool** before talking to the
-user, and check the people mask actually covers the people.
+## 1. You cannot see RAW files directly - convert first
 
-Summarise to the user in their language (Arabic if they wrote Arabic): how many
-people, what light it was shot in, what is wrong (e.g. "الكاميرا وازنت اللون على
-3200K لكن الإضاءة الفعلية ~5600K فالصورة مائلة للأزرق"), what you suggest.
+The Read/image tools cannot display `.ARW/.NEF/.CR3/...`. Always make a JPEG
+and look at that:
 
-## 2. Offer the options (presets)
+```bash
+python -m photo_editor preview /path/DSC01234.ARW --out-dir /tmp/pe
+# -> /tmp/pe/DSC01234_view.jpg  (camera's embedded preview, or a quick render)
+```
 
-Choosing a preset sets **every** parameter: white balance, exposure, tone,
-colour, subject/background separation, detail and effects.
+## 2. Analyse
+
+```bash
+python -m photo_editor analyze /path/DSC01234.ARW --preview-dir /tmp/pe
+```
+
+JSON: camera/lens/ISO/shutter, **people** (faces, % of frame), **estimated
+light** (K) vs the camera's WB, exposure error (EV), clipping, noise, `issues`,
+`recommended_presets`; plus `<name>_asshot.jpg` and `<name>_people_mask.jpg`.
+Look at the images, then summarise for the user in their language (Arabic if
+they wrote Arabic).
+
+## 3. Offer the options
+
+Each preset sets **every** parameter (white balance, exposure, tone, colour,
+separation, face retouch, detail, effects).
 
 | preset | العربية | what it does |
 |---|---|---|
-| `natural` | طبيعي | true colours, full auto WB, people slightly separated (default) |
-| `portrait_pop` | بورتريه بارز | blurred & darker background, crisp subject, healthy skin |
-| `soft_portrait` | بورتريه ناعم | low contrast, lifted blacks, warm skin, skin smoothing |
-| `cinematic` | سينمائي | teal & orange grade, deeper contrast, darker surroundings, grain |
-| `vivid` | حيوي | rich colour for travel/landscape, skin kept natural |
+| `beauty_only` | تجميل فقط (الصورة كما هي) | photo stays exactly as shot - only faces are retouched |
+| `natural` | طبيعي | true colours, natural WB, light separation, light retouch (default) |
+| `portrait_pop` | بورتريه بارز | blurred darker background, crisp subject, retouch |
+| `soft_portrait` | بورتريه ناعم | soft contrast, warm glowing skin, stronger retouch |
+| `cinematic` | سينمائي | teal & orange grade, darker surroundings |
+| `vivid` | حيوي | rich colours for travel/landscape |
 | `warm_golden` | ذهبي دافئ | golden-hour warmth |
-| `cool_clean` | بارد ونظيف | crisp, slightly cool, clean whites |
-| `moody` | درامي داكن | dark, muted, subject lit, surroundings fall away |
-| `matte_film` | فيلم مطفي | faded film, lifted blacks, grain |
+| `cool_clean` | بارد ونظيف | crisp, slightly cool |
+| `moody` | درامي داكن | dark, muted, subject lit |
+| `matte_film` | فيلم مطفي | faded film with grain |
 | `bw_classic` | أبيض وأسود | rich black & white |
 
-To let the user choose visually, render all presets on one sheet and show it:
+Visual choice - all presets on one sheet:
+`python -m photo_editor grid /path/photo.ARW -o /tmp/pe/presets.jpg`
+
+If the user already said what they want, pick it yourself. Otherwise ask
+(AskUserQuestion when available), offering `beauty_only` + 2-3 recommended presets.
+
+## 4. Edit
 
 ```bash
-python -m photo_editor grid PHOTO.ARW -o output/presets.jpg
+python -m photo_editor edit /path/DSC01234.ARW --preset natural --out-dir /out --compare --masks
+python -m photo_editor edit /path/DSC01234.ARW --preset beauty_only --set retouch=0.8 -o /out/DSC01234_beauty.jpg --compare
 ```
 
-If the user already said what they want ("طبيعي", "عزل الشخص", "صحح الوايت بالنس"),
-don't ask - pick the preset and overrides yourself (table in step 4). Otherwise
-ask with AskUserQuestion, offering 3-4 of the `recommended_presets`.
+`--fast` = half-resolution decode for quick previews; `--tiff` = 16-bit TIFF;
+several input files = batch. Outputs: the image (full resolution, EXIF kept),
+`_compare.jpg` (as shot | edited), `_masks.jpg` (people/skin), `_faces.jpg`
+(retouch regions per face).
 
-## 3. Edit
+## 5. Overrides - map the user's words to parameters (`--set key=value`)
 
-```bash
-python -m photo_editor edit PHOTO.ARW --preset natural --out-dir output/ --compare --masks --report
-# quick look first (half-resolution decode, ~4x faster):
-python -m photo_editor edit PHOTO.ARW --preset natural --out-dir output/ --compare --fast
-```
+**Face beauty (تجميل الوجه)** - `retouch` is the master strength 0..1
+(0.3 light, 0.6 normal, 0.9 strong); each step can be set on its own:
 
-Outputs: `<name>_<preset>.jpg` (full resolution, sRGB, EXIF kept), plus
-`_compare.jpg` (as shot | edited), `_masks.jpg`, `_report.json`.
-Use `--tiff` for a 16-bit TIFF, `-o path.jpg` for an explicit name, several
-files at once for a batch.
+| user asks | parameter |
+|---|---|
+| remove pimples / spots / marks — إزالة الحبوب والبثور | `retouch_blemish=0.8` |
+| reduce redness / irritation — تخفيف الاحمرار | `retouch_redness=0.7` |
+| even / smoother skin, keep pores — توحيد البشرة | `retouch_smooth=0.5` (keep ≤ 0.7) |
+| dark circles — الهالات السوداء | `retouch_under_eye=0.6` |
+| oily shine — لمعان البشرة | `retouch_shine=0.6` |
+| whiter teeth — تبييض الأسنان | `retouch_teeth=0.5` |
+| clear whites of eyes — بياض العين | `retouch_eyes=0.5` |
+| no face retouch at all | `retouch=0` |
+| keep the photo as is, beauty only — الصورة كما هي | `--preset beauty_only` (or `keep_original=true`) |
 
-## 4. Adjust with overrides
-
-Any parameter can be overridden on top of a preset: `--set key=value` (repeat)
-or `--params file.json`. Map the user's words to parameters:
+**Light & colour**
 
 | user asks | parameters |
 |---|---|
-| natural WB / remove the yellow, blue, green cast — وايت بالنس طبيعي | `wb_mode=auto wb_strength=1 warmth=0 tint=0` |
-| a bit warmer / cooler — أدفأ / أبرد | `warmth=+10` / `warmth=-10` (mireds; ±5 subtle, ±25 strong) |
-| too green / too magenta | `tint=+10` (adds magenta) / `tint=-10` |
-| keep the camera's colours | `wb_mode=camera` |
-| set light to e.g. 3200K | `wb_mode=kelvin wb_kelvin=3200` |
-| brighter / darker — أفتح / أغمق | `exposure=+0.3` / `exposure=-0.3` (EV, on top of auto) |
-| recover sky/highlights | `highlights=-0.6` |
-| open up shadows/faces in shade | `shadows=+0.5` |
-| more / less contrast | `contrast=+0.1` / `contrast=-0.1` |
-| more colour / calmer colour | `vibrance=+0.2` / `saturation=-0.15` |
-| isolate person more — عزل الشخص أكثر | `bg_blur=0.5 bg_exposure=-0.4 bg_saturation=-0.2 subject_exposure=0.15` |
-| isolate only slightly — عزل خفيف | `bg_blur=0.2 bg_exposure=-0.15 bg_saturation=-0.05` |
-| no background blur | `bg_blur=0` (or `separate_subject=false` to disable all separation) |
-| smoother skin | `skin_smooth=0.3` (0.2 subtle, 0.5 strong; never above 0.6) |
-| more natural skin tone | `skin_tone=0.6` |
-| sharper / more detail | `sharpen=0.7 clarity=0.15 texture=0.1` |
-| noise (high ISO) | `denoise=0.6` (default `auto` derives it from ISO) |
-| per-colour tweaks | `hue_<band>`, `sat_<band>`, `lum_<band>`, bands: red orange yellow green aqua blue purple magenta |
-| vignette / grain | `vignette=0.3`, `grain=0.3` |
+| natural white balance — وايت بالنس طبيعي | `wb_mode=auto wb_strength=1 warmth=0 tint=0` |
+| warmer / cooler — أدفأ / أبرد | `warmth=10` / `warmth=-10` |
+| too green / too magenta | `tint=10` / `tint=-10` |
+| camera colours / exact light | `wb_mode=camera` / `wb_mode=kelvin wb_kelvin=3200` |
+| brighter / darker — أفتح / أغمق | `exposure=0.3` / `exposure=-0.3` |
+| recover sky / open shadows | `highlights=-0.6` / `shadows=0.5` |
+| contrast, colour | `contrast=±0.1`, `vibrance=0.2`, `saturation=-0.15` |
+| isolate person more / slightly — عزل الشخص | `bg_blur=0.5 bg_exposure=-0.4 bg_saturation=-0.2 subject_exposure=0.15` / `bg_blur=0.2 bg_exposure=-0.15` |
+| no background changes | `separate_subject=false` |
+| sharper, less noise | `sharpen=0.7 clarity=0.15`, `denoise=0.6` |
 
-Full list with defaults: `photo_editor/presets.py` (`DEFAULTS`).
+Full list: `photo_editor/presets.py` (`DEFAULTS`).
 
-## 5. Verify before delivering
+## 6. Verify before delivering
 
-Look at `_compare.jpg` (and `_masks.jpg` when people were separated) with Read:
+Look at `_compare.jpg`, and for retouching crop/zoom the face area of the
+result (e.g. with PIL) to check at 100%:
 
-- whites/greys neutral, skin natural (not orange, grey or magenta);
-- no halo or blurred patch around hair/shoulders - if the mask missed a body
-  part, lower `bg_blur`, or disable separation for that image;
-- highlights not blown, shadows not crushed (`output_stats` in the JSON:
-  `clipped_highlights_pct` should normally stay < 1%).
+- spots gone, pores and skin texture still visible (not plastic); if too
+  smooth lower `retouch_smooth`; if spots remain raise `retouch_blemish`;
+- eyes, brows, lips and beard untouched (see `_faces.jpg`); moles the person
+  may want to keep: lower `retouch_blemish` or ask;
+- whites neutral, skin natural, no halo around hair if the background was blurred.
 
-Fix with overrides and re-run (use `--fast` while iterating, full resolution for
-the final). Then tell the user which preset and settings were applied, what was
-corrected (e.g. "light ~3100K tungsten → neutralised", "+1.2 EV"), and give the
-output path(s).
-
-## How it works (for explaining to the user)
-
-1. **RAW decode** (rawpy/LibRaw, AHD demosaic, 16-bit linear, daylight WB) → linear sRGB.
-2. **People** - MediaPipe face detector + DeepLabV3 person + selfie multiclass
-   (hair/skin/clothes), also run on a crop around each face, refined with a
-   guided filter for soft hair edges.
-3. **White balance** - searches real light sources (Planckian locus) for the one
-   that turns the most background surfaces neutral, combined with grey-edge /
-   shades-of-grey / bright-patch, then checks skin hue; people are excluded from
-   the estimate so skin and clothes do not bias it.
-4. **Exposure** - meters the scene and the people, protects highlights; local
-   highlight/shadow recovery with an edge-aware base layer.
-5. **Separation** - halo-free lens-like background blur in linear light,
-   background exposure/saturation/clarity vs subject.
-6. **Tone & colour** - filmic highlight roll-off, contrast/levels, vibrance with
-   skin protection, HSL, colour grading, B&W - in OKLab.
-7. **Detail** - ISO-aware noise reduction, clarity, texture, sharpening, grain.
+Then tell the user what was done (preset, number of blemishes removed, light
+~K corrected, EV) and give the output path(s).

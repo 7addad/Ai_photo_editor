@@ -27,6 +27,7 @@ import numpy as np
 
 from .color import linear_to_srgb
 
+BUNDLED_MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 MODEL_DIR = os.environ.get("AI_PHOTO_EDITOR_MODELS",
                            os.path.join(os.path.expanduser("~"), ".cache", "ai_photo_editor", "models"))
 MODELS = {
@@ -36,6 +37,10 @@ MODELS = {
                    "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"),
     "deeplab": ("deeplab_v3.tflite",
                 "https://storage.googleapis.com/mediapipe-models/image_segmenter/deeplab_v3/float32/1/deeplab_v3.tflite"),
+    "landmarker": ("face_landmarker.task",
+                   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"),
+    "yunet": ("face_detection_yunet_2023mar.onnx",
+              "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx"),
     "multiclass": ("selfie_multiclass_256x256.tflite",
                    "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite"),
 }
@@ -92,6 +97,9 @@ class Segmentation:
 
 def model_path(key: str, download: bool = True) -> str | None:
     name, url = MODELS[key]
+    bundled = os.path.join(BUNDLED_MODEL_DIR, name)
+    if os.path.exists(bundled) and os.path.getsize(bundled) > 1000:
+        return bundled
     path = os.path.join(MODEL_DIR, name)
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return path
@@ -275,16 +283,55 @@ def _mediapipe_masks(u8: np.ndarray):
 
 # ---------------------------------------------------------------- OpenCV fallback
 
+def mediapipe_enabled() -> bool:
+    if os.environ.get("AI_PHOTO_EDITOR_NO_MEDIAPIPE"):
+        return False
+    try:
+        import importlib
+        importlib.import_module("mediapipe")
+        return True
+    except Exception:
+        return False
+
+
+def yunet_detect(u8: np.ndarray, score: float = 0.6) -> list:
+    """OpenCV YuNet face detector (bundled 230 KB model, needs only OpenCV).
+    Returns [(x, y, w, h, score, five_points)] with five_points =
+    [right_eye, left_eye, nose, right_mouth, left_mouth] as (x, y)."""
+    path = model_path("yunet")
+    if not path or not hasattr(cv2, "FaceDetectorYN"):
+        return []
+    H, W = u8.shape[:2]
+    s = min(1.0, 1280 / max(H, W))
+    img = cv2.resize(u8, (round(W * s), round(H * s)), interpolation=cv2.INTER_AREA) if s < 1 else u8
+    try:
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+    except Exception:
+        pass
+    try:
+        det = cv2.FaceDetectorYN.create(path, "", (img.shape[1], img.shape[0]), score, 0.3, 5000)
+        _, res = det.detect(cv2.cvtColor(np.ascontiguousarray(img), cv2.COLOR_RGB2BGR))
+    except cv2.error:
+        return []
+    out = []
+    for r in (res if res is not None else []):
+        r = r / np.array([s] * 14 + [1.0], np.float32)
+        pts = r[4:14].reshape(5, 2)
+        out.append((float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[14]), pts))
+    return out
+
+
 def _opencv_masks(u8: np.ndarray):
     H, W = u8.shape[:2]
     gray = cv2.cvtColor(u8, cv2.COLOR_RGB2GRAY)
-    faces = []
-    cascade = os.path.join(getattr(getattr(cv2, "data", None), "haarcascades", ""),
-                           "haarcascade_frontalface_default.xml")
-    if os.path.exists(cascade):
-        casc = cv2.CascadeClassifier(cascade)
-        det = casc.detectMultiScale(gray, 1.1, 5, minSize=(max(16, W // 60), max(16, W // 60)))
-        faces = [(int(x), int(y), int(w), int(h), 0.8) for (x, y, w, h) in det]
+    faces = [(int(round(f[0])), int(round(f[1])), int(round(f[2])), int(round(f[3])), f[4]) for f in yunet_detect(u8)]
+    if not faces:
+        cascade = os.path.join(getattr(getattr(cv2, "data", None), "haarcascades", ""),
+                               "haarcascade_frontalface_default.xml")
+        if os.path.exists(cascade):
+            casc = cv2.CascadeClassifier(cascade)
+            det = casc.detectMultiScale(gray, 1.1, 5, minSize=(max(16, W // 60), max(16, W // 60)))
+            faces = [(int(x), int(y), int(w), int(h), 0.8) for (x, y, w, h) in det]
     person = np.zeros((H, W), np.float32)
     for f in faces:
         x0, y0, x1, y1 = _body_box(f, W, H)
@@ -302,7 +349,7 @@ def _opencv_masks(u8: np.ndarray):
     ycc = cv2.cvtColor(u8, cv2.COLOR_RGB2YCrCb)
     skin = ((ycc[..., 1] > 135) & (ycc[..., 1] < 180) & (ycc[..., 2] > 85) & (ycc[..., 2] < 135)).astype(np.float32)
     skin = cv2.GaussianBlur(skin, (0, 0), 2) * person
-    return person, skin, faces, "opencv:haar+grabcut"
+    return person, skin, faces, "opencv:yunet+grabcut"
 
 
 # ---------------------------------------------------------------- public API
@@ -315,6 +362,8 @@ def segment_people(srgb: np.ndarray, work_size: int = 1280) -> Segmentation:
     small = cv2.resize(srgb, (max(1, round(W * s)), max(1, round(H * s))), interpolation=cv2.INTER_AREA) if s < 1 else srgb
     u8 = (np.clip(small, 0, 1) * 255 + 0.5).astype(np.uint8)
     try:
+        if not mediapipe_enabled():
+            raise RuntimeError("mediapipe disabled/unavailable")
         with _quiet_native_stderr():
             person, skin, faces, backend = _mediapipe_masks(u8)
     except Exception:

@@ -77,3 +77,46 @@ def test_overrides_and_parse():
     assert presets.parse_value("0.5") == 0.5 and presets.parse_value("true") is True
     with pytest.raises(KeyError):
         presets.resolve("does_not_exist")
+
+
+# ---------------------------------------------------------------- face retouch
+
+def _synthetic_face(spot=True):
+    """Skin-coloured face ellipse on a grey background with a dark red spot."""
+    from photo_editor.face_landmarks import _ellipse, Face
+    h, w = 400, 400
+    img = np.full((h, w, 3), 0.45, np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    face_m = ((xx - 200) / 110.0) ** 2 + ((yy - 200) / 150.0) ** 2 < 1
+    rng = np.random.default_rng(0)
+    img[face_m] = np.array([0.80, 0.60, 0.48], np.float32)
+    img += rng.normal(0, 0.006, img.shape).astype(np.float32)        # skin texture
+    if spot:
+        g = np.exp(-((xx - 150) ** 2 + (yy - 240) ** 2) / (2 * 3.5 ** 2))[..., None]
+        img = img * (1 - 0.55 * g) + np.array([0.55, 0.25, 0.22], np.float32) * 0.55 * g
+    face = Face(box=(90, 50, 220, 300), oval=_ellipse(200, 200, 110, 150),
+                eyes=[_ellipse(160, 160, 22, 10), _ellipse(240, 160, 22, 10)],
+                brows=[_ellipse(160, 135, 26, 7), _ellipse(240, 135, 26, 7)],
+                lips=_ellipse(200, 290, 40, 14), nostrils=_ellipse(200, 245, 18, 7), source="test")
+    return np.clip(img, 0, 1), face
+
+
+def test_retouch_removes_spot_and_keeps_rest():
+    from photo_editor.retouch import retouch
+    img, face = _synthetic_face()
+    out, rep = retouch(img, [face], {"retouch": 0.8})
+    assert rep["blemishes_removed"] >= 1
+    spot_before = np.abs(img[236:245, 146:155] - img[236:245, 170:179].mean((0, 1))).mean()
+    spot_after = np.abs(out[236:245, 146:155] - out[236:245, 170:179].mean((0, 1))).mean()
+    assert spot_after < spot_before * 0.4
+    # background (outside the face) is bit-identical
+    assert np.array_equal(out[:30], img[:30])
+
+
+def test_beauty_only_keeps_colours():
+    img, face = _synthetic_face(spot=False)
+    data = ImageData(linear=srgb_to_linear(img), path="x.jpg", is_raw=False)
+    seg = Segmentation(person=np.zeros(img.shape[:2], np.float32), skin=np.zeros(img.shape[:2], np.float32),
+                       faces=[], backend="test")
+    res = process(data, presets.resolve("beauty_only", {"retouch": 0.0}), seg=seg)
+    assert np.abs(res.srgb - img).max() < 1e-3          # nothing but retouch may change
